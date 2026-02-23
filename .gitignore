@@ -30,6 +30,8 @@ settings-*.json
 !settings-*.json.template
 deploy-config.json
 !deploy-config.json.template
+deploy_settings.sh
+!deploy_settings.sh.template
 
 # Testing
 .coverage
