@@ -1,0 +1,50 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+.venv/
+ENV/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Local development
+local.settings.json
+.env
+*.log
+*.pid
+
+# Secrets - NEVER commit these!
+settings-*.json
+!settings-*.json.template
+deploy-config.json
+!deploy-config.json.template
+
+# Testing
+.coverage
+htmlcov/
+test_*.py
+
+# Temporary files
+temp/
+tmp/
+*.tmp
+.DS_Store
+
+# Azure Functions
+.python_packages/
+.funcignore
+
+# Docker
+.dockerignore

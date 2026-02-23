@@ -1,0 +1,26 @@
+version: '3.8'
+
+services:
+  azfn:
+    build:
+      context: .
+      dockerfile: Dockerfile.local
+      platforms:
+        - linux/amd64
+    ports:
+      - "7071:80"
+    env_file:
+      - .env
+    environment:
+      - AzureWebJobsStorage=UseDevelopmentStorage=true
+      - AzureFunctionsJobHost__functions__0__authLevel=anonymous  # เพิ่มบรรทัดนี้
+      - ASPNETCORE_ENVIRONMENT=Development  # เพิ่มบรรทัดนี้
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
+          memory: 4G
+        reservations:
+          memory: 2G
+    volumes:
+      - ./processed:/home/site/wwwroot/processed

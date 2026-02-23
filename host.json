@@ -1,0 +1,29 @@
+{
+  "version": "2.0",
+  "functionTimeout": "00:10:00",
+  "logging": {
+    "applicationInsights": {
+      "samplingSettings": {
+        "isEnabled": true,
+        "maxTelemetryItemsPerSecond": 20
+      }
+    },
+    "logLevel": {
+      "default": "Information",
+      "Function": "Information"
+    }
+  },
+  "extensions": {
+    "http": {
+      "routePrefix": "api",
+      "maxOutstandingRequests": 30,
+      "maxConcurrentRequests": 10,
+      "dynamicThrottlesEnabled": true
+    }
+  },
+  "retry": {
+    "strategy": "fixedDelay",
+    "maxRetryCount": 2,
+    "delayInterval": "00:00:05"
+  }
+}

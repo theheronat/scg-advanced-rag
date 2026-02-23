@@ -1,0 +1,14 @@
+FROM mcr.microsoft.com/azure-functions/python:4-python3.12
+
+RUN apt-get update && \
+    apt-get install -y libreoffice fonts-thai-tlwg && \
+    apt-get clean
+
+ENV AzureWebJobsScriptRoot=/home/site/wwwroot
+
+WORKDIR /home/site/wwwroot
+
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY . .
