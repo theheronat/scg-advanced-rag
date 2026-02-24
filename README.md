@@ -33,6 +33,14 @@ Before deploying, ensure you have:
 - **Python 3.9+** for local development
 - **Azure Functions Core Tools** v4 ([Install](https://docs.microsoft.com/en-us/azure/azure-functions/functions-run-local))
 - **Git** for version control
+- **PowerShell 7+** (for Windows users) - [Download](https://github.com/PowerShell/PowerShell/releases)
+
+### Windows-Specific Requirements
+
+If you're on Windows, make sure to:
+1. Install **Windows Terminal** for better command-line experience
+2. Run PowerShell as Administrator when installing tools
+3. Enable long path support: `Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem" -Name "LongPathsEnabled" -Value 1`
 
 ### Required Azure Resources
 
@@ -44,29 +52,115 @@ You'll need to create the following Azure resources:
 4. Azure OpenAI Service
 5. Azure Functions App (Linux, Python 3.9+)
 
+## Windows Quick Start Guide
+
+For Windows users, here's a streamlined setup process:
+
+### 1. Install Prerequisites
+
+**Install from Official Sources:**
+- [Python 3.9+](https://www.python.org/downloads/) - Check "Add Python to PATH"
+- [Azure CLI](https://learn.microsoft.com/cli/azure/install-azure-cli-windows) - Use MSI installer
+- [Azure Functions Core Tools](https://learn.microsoft.com/azure/azure-functions/functions-run-local) - via npm or MSI
+- [Git for Windows](https://git-scm.com/download/win) - Includes Git Bash
+- [PowerShell 7+](https://github.com/PowerShell/PowerShell/releases) - Optional but recommended
+
+**Via Package Manager (Chocolatey):**
+```powershell
+# Install Chocolatey first from https://chocolatey.org
+choco install python azure-cli git nodejs
+npm install -g azure-functions-core-tools@4
+```
+
+**Via Package Manager (winget):**
+```powershell
+winget install Python.Python.3.11
+winget install Microsoft.AzureCLI
+winget install Git.Git
+winget install OpenJS.NodeJS
+npm install -g azure-functions-core-tools@4
+```
+
+### 2. Verify Installation
+
+Open PowerShell and verify all tools:
+```powershell
+python --version
+az --version
+func --version
+git --version
+```
+
+### 3. Key Windows Differences
+
+| Aspect | Linux/Mac | Windows PowerShell |
+|--------|-----------|-------------------|
+| Line continuation | `\` | `` ` `` (backtick) |
+| Virtual env activation | `source .venv/bin/activate` | `.venv\Scripts\Activate.ps1` |
+| Copy files | `cp file1 file2` | `Copy-Item file1 file2` |
+| Variables | `$VAR` in bash | `$VAR` in PowerShell |
+| Path separator | `/` | `\` |
+| curl command | `curl` | `curl.exe` or `Invoke-RestMethod` |
+| Shell scripts | `.sh` files run directly | Need Git Bash or convert to `.ps1` |
+
+### 4. Recommended: Windows Terminal
+
+Install Windows Terminal for better experience:
+```powershell
+winget install Microsoft.WindowsTerminal
+```
+
+Or from Microsoft Store.
+
 ## Quick Start - Local Development
 
 ### 1. Clone the Repository
 
+**Linux/Mac:**
 ```bash
+git clone https://github.com/theheronat/scg-advanced-rag.git
+cd scg-advanced-rag
+```
+
+**Windows (PowerShell):**
+```powershell
 git clone https://github.com/theheronat/scg-advanced-rag.git
 cd scg-advanced-rag
 ```
 
 ### 2. Create Virtual Environment
 
+**Linux/Mac:**
 ```bash
-python -m venv .venv
-source .venv/bin/activate  # On Windows: .venv\Scripts\activate
+python3 -m venv .venv
+source .venv/bin/activate
 pip install -r requirements.txt
+```
+
+**Windows (PowerShell):**
+```powershell
+python -m venv .venv
+.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+```
+
+**Note for Windows:** If you get an execution policy error, run:
+```powershell
+Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
 ```
 
 ### 3. Configure Local Settings
 
 Copy the local settings template and fill in your Azure credentials:
 
+**Linux/Mac:**
 ```bash
 cp local.settings.json.example local.settings.json
+```
+
+**Windows (PowerShell):**
+```powershell
+Copy-Item local.settings.json.example local.settings.json
 ```
 
 Edit `local.settings.json`:
@@ -104,8 +198,14 @@ The API will be available at `http://localhost:7071`
 
 ## Azure Deployment - Step by Step
 
+> **Note for Windows Users:**
+> - On Windows PowerShell, line continuation uses backtick `` ` `` instead of backslash `\`
+> - Variables are accessed with `$variableName` instead of `"$variableName"`
+> - Commands shown work the same way; only syntax differs slightly
+
 ### Step 1: Login to Azure
 
+**Linux/Mac/Windows (same command):**
 ```bash
 az login
 az account set --subscription "your-subscription-id"
@@ -113,14 +213,23 @@ az account set --subscription "your-subscription-id"
 
 ### Step 2: Create Resource Group
 
+**Linux/Mac:**
 ```bash
 az group create \
   --name "rg-scg-dataprep" \
   --location "eastus"
 ```
 
+**Windows (PowerShell):**
+```powershell
+az group create `
+  --name "rg-scg-dataprep" `
+  --location "eastus"
+```
+
 ### Step 3: Create Azure Storage Account
 
+**Linux/Mac:**
 ```bash
 az storage account create \
   --name "scgdataprepdemo" \
@@ -142,8 +251,31 @@ az storage container create \
   --account-key "$STORAGE_KEY"
 ```
 
+**Windows (PowerShell):**
+```powershell
+az storage account create `
+  --name "scgdataprepdemo" `
+  --resource-group "rg-scg-dataprep" `
+  --location "eastus" `
+  --sku "Standard_LRS" `
+  --kind "StorageV2"
+
+# Get storage account key
+$STORAGE_KEY = az storage account keys list `
+  --account-name "scgdataprepdemo" `
+  --resource-group "rg-scg-dataprep" `
+  --query "[0].value" -o tsv
+
+# Create container
+az storage container create `
+  --name "raw" `
+  --account-name "scgdataprepdemo" `
+  --account-key $STORAGE_KEY
+```
+
 ### Step 4: Create Azure AI Document Intelligence
 
+**Linux/Mac:**
 ```bash
 az cognitiveservices account create \
   --name "scg-doc-intelligence" \
@@ -164,8 +296,30 @@ DOC_INTELLIGENCE_KEY=$(az cognitiveservices account keys list \
   --query "key1" -o tsv)
 ```
 
+**Windows (PowerShell):**
+```powershell
+az cognitiveservices account create `
+  --name "scg-doc-intelligence" `
+  --resource-group "rg-scg-dataprep" `
+  --kind "FormRecognizer" `
+  --sku "S0" `
+  --location "eastus"
+
+# Get endpoint and key
+$DOC_INTELLIGENCE_ENDPOINT = az cognitiveservices account show `
+  --name "scg-doc-intelligence" `
+  --resource-group "rg-scg-dataprep" `
+  --query "properties.endpoint" -o tsv
+
+$DOC_INTELLIGENCE_KEY = az cognitiveservices account keys list `
+  --name "scg-doc-intelligence" `
+  --resource-group "rg-scg-dataprep" `
+  --query "key1" -o tsv
+```
+
 ### Step 5: Create Azure AI Search
 
+**Linux/Mac:**
 ```bash
 az search service create \
   --name "scg-search-demo" \
@@ -180,8 +334,24 @@ SEARCH_KEY=$(az search admin-key show \
   --query "primaryKey" -o tsv)
 ```
 
+**Windows (PowerShell):**
+```powershell
+az search service create `
+  --name "scg-search-demo" `
+  --resource-group "rg-scg-dataprep" `
+  --sku "basic" `
+  --location "eastus"
+
+# Get admin key
+$SEARCH_KEY = az search admin-key show `
+  --service-name "scg-search-demo" `
+  --resource-group "rg-scg-dataprep" `
+  --query "primaryKey" -o tsv
+```
+
 ### Step 6: Create Azure OpenAI Service
 
+**Linux/Mac:**
 ```bash
 az cognitiveservices account create \
   --name "scg-openai-demo" \
@@ -224,8 +394,52 @@ OPENAI_KEY=$(az cognitiveservices account keys list \
   --query "key1" -o tsv)
 ```
 
+**Windows (PowerShell):**
+```powershell
+az cognitiveservices account create `
+  --name "scg-openai-demo" `
+  --resource-group "rg-scg-dataprep" `
+  --kind "OpenAI" `
+  --sku "S0" `
+  --location "eastus"
+
+# Deploy embedding model
+az cognitiveservices account deployment create `
+  --name "scg-openai-demo" `
+  --resource-group "rg-scg-dataprep" `
+  --deployment-name "text-embedding-3-large" `
+  --model-name "text-embedding-3-large" `
+  --model-version "1" `
+  --model-format "OpenAI" `
+  --sku-capacity 1 `
+  --sku-name "Standard"
+
+# Deploy chat model (optional, for document processing)
+az cognitiveservices account deployment create `
+  --name "scg-openai-demo" `
+  --resource-group "rg-scg-dataprep" `
+  --deployment-name "gpt-4o-mini" `
+  --model-name "gpt-4o-mini" `
+  --model-version "2024-07-18" `
+  --model-format "OpenAI" `
+  --sku-capacity 1 `
+  --sku-name "Standard"
+
+# Get endpoint and key
+$OPENAI_ENDPOINT = az cognitiveservices account show `
+  --name "scg-openai-demo" `
+  --resource-group "rg-scg-dataprep" `
+  --query "properties.endpoint" -o tsv
+
+$OPENAI_KEY = az cognitiveservices account keys list `
+  --name "scg-openai-demo" `
+  --resource-group "rg-scg-dataprep" `
+  --query "key1" -o tsv
+```
+
 ### Step 7: Create Azure Function App
 
+**Linux/Mac:**
 ```bash
 # Create a storage account for the function app
 az storage account create \
@@ -246,23 +460,49 @@ az functionapp create \
   --os-type "Linux"
 ```
 
+**Windows (PowerShell):**
+```powershell
+# Create a storage account for the function app
+az storage account create `
+  --name "scgfunctionstorage" `
+  --resource-group "rg-scg-dataprep" `
+  --location "eastus" `
+  --sku "Standard_LRS"
+
+# Create Function App
+az functionapp create `
+  --resource-group "rg-scg-dataprep" `
+  --consumption-plan-location "eastus" `
+  --runtime "python" `
+  --runtime-version "3.9" `
+  --functions-version "4" `
+  --name "azfn-scg-dataprep" `
+  --storage-account "scgfunctionstorage" `
+  --os-type "Linux"
+```
+
 ### Step 8: Configure Application Settings
 
 Create a deployment settings script:
 
+**Linux/Mac:**
 ```bash
 cp deploy_settings.sh.template deploy_settings.sh
-```
-
-Edit `deploy_settings.sh` with your values, then run:
-
-```bash
+# Edit deploy_settings.sh with your values, then run:
 chmod +x deploy_settings.sh
 ./deploy_settings.sh
 ```
 
+**Windows (PowerShell):**
+```powershell
+Copy-Item deploy_settings.sh.template deploy_settings.sh
+# Edit deploy_settings.sh with your values, then run:
+bash ./deploy_settings.sh
+```
+
 Or configure manually:
 
+**Linux/Mac:**
 ```bash
 az functionapp config appsettings set \
   --name "azfn-scg-dataprep" \
@@ -283,14 +523,37 @@ az functionapp config appsettings set \
     AZURE_OPENAI_EMBEDDING_MODEL="text-embedding-3-large"
 ```
 
+**Windows (PowerShell):**
+```powershell
+az functionapp config appsettings set `
+  --name "azfn-scg-dataprep" `
+  --resource-group "rg-scg-dataprep" `
+  --settings `
+    AZURE_STORAGE_ACCOUNT_NAME="scgdataprepdemo" `
+    AZURE_STORAGE_ACCOUNT_KEY="$STORAGE_KEY" `
+    AZURE_STORAGE_CONTAINER="raw" `
+    AZURE_FORM_RECOGNIZER_ENDPOINT="$DOC_INTELLIGENCE_ENDPOINT" `
+    AZURE_FORM_RECOGNIZER_KEY="$DOC_INTELLIGENCE_KEY" `
+    AZURE_SEARCH_ENDPOINT="https://scg-search-demo.search.windows.net" `
+    AZURE_SEARCH_INDEX="scg-rag" `
+    AZURE_SEARCH_KEY="$SEARCH_KEY" `
+    AZURE_OPENAI_URL="$OPENAI_ENDPOINT" `
+    AZURE_OPENAI_MODEL="gpt-4o-mini" `
+    AZURE_OPENAI_API_VERSION="2025-01-01-preview" `
+    AZURE_OPENAI_API_KEY="$OPENAI_KEY" `
+    AZURE_OPENAI_EMBEDDING_MODEL="text-embedding-3-large"
+```
+
 ### Step 9: Deploy the Function App
 
+**Linux/Mac/Windows (same command):**
 ```bash
 func azure functionapp publish azfn-scg-dataprep
 ```
 
 ### Step 10: Verify Deployment
 
+**Linux/Mac:**
 ```bash
 # Get function app URL
 az functionapp show \
@@ -299,6 +562,21 @@ az functionapp show \
   --query "defaultHostName" -o tsv
 
 # Test health endpoint
+curl https://azfn-scg-dataprep.azurewebsites.net/api/health
+```
+
+**Windows (PowerShell):**
+```powershell
+# Get function app URL
+az functionapp show `
+  --name "azfn-scg-dataprep" `
+  --resource-group "rg-scg-dataprep" `
+  --query "defaultHostName" -o tsv
+
+# Test health endpoint (using Invoke-WebRequest)
+Invoke-WebRequest -Uri "https://azfn-scg-dataprep.azurewebsites.net/api/health"
+
+# Or if curl is installed on Windows
 curl https://azfn-scg-dataprep.azurewebsites.net/api/health
 ```
 
@@ -350,6 +628,7 @@ For detailed API documentation, see [API_USAGE.md](API_USAGE.md).
 
 ### Upload and Process a Document
 
+**Linux/Mac:**
 ```bash
 # Upload a document
 curl -X POST \
@@ -371,10 +650,42 @@ curl -X POST \
 curl https://azfn-scg-dataprep.azurewebsites.net/api/status/doc_12345
 ```
 
+**Windows (PowerShell):**
+```powershell
+# Upload a document
+curl.exe -X POST `
+  -F "file=@document.pdf" `
+  https://azfn-scg-dataprep.azurewebsites.net/api/upload
+
+# Or using PowerShell native commands
+$headers = @{
+    "Content-Type" = "multipart/form-data"
+}
+$filePath = "C:\path\to\document.pdf"
+$uri = "https://azfn-scg-dataprep.azurewebsites.net/api/upload"
+Invoke-RestMethod -Uri $uri -Method Post -InFile $filePath -Headers $headers
+
+# Process the document
+curl.exe -X POST https://azfn-scg-dataprep.azurewebsites.net/api/process/document.pdf
+
+# Check status
+curl.exe https://azfn-scg-dataprep.azurewebsites.net/api/status/doc_12345
+```
+
 ### Search Documents
 
+**Linux/Mac:**
 ```bash
 curl "https://azfn-scg-dataprep.azurewebsites.net/api/search?query=azure+functions"
+```
+
+**Windows (PowerShell):**
+```powershell
+# Using curl
+curl.exe "https://azfn-scg-dataprep.azurewebsites.net/api/search?query=azure+functions"
+
+# Or using PowerShell native command
+Invoke-RestMethod -Uri "https://azfn-scg-dataprep.azurewebsites.net/api/search?query=azure+functions"
 ```
 
 ## Configuration Options
@@ -400,6 +711,7 @@ curl "https://azfn-scg-dataprep.azurewebsites.net/api/search?query=azure+functio
 
 ### View Logs
 
+**Linux/Mac:**
 ```bash
 # Stream logs
 func azure functionapp logstream azfn-scg-dataprep
@@ -407,6 +719,17 @@ func azure functionapp logstream azfn-scg-dataprep
 # Or via Azure CLI
 az webapp log tail \
   --name "azfn-scg-dataprep" \
+  --resource-group "rg-scg-dataprep"
+```
+
+**Windows (PowerShell):**
+```powershell
+# Stream logs
+func azure functionapp logstream azfn-scg-dataprep
+
+# Or via Azure CLI
+az webapp log tail `
+  --name "azfn-scg-dataprep" `
   --resource-group "rg-scg-dataprep"
 ```
 
@@ -420,6 +743,31 @@ az webapp log tail \
 
 **Issue: OpenAI rate limits**
 - Solution: Implement retry logic or increase quota
+
+### Windows-Specific Troubleshooting
+
+**Issue: PowerShell execution policy error**
+```powershell
+Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
+```
+
+**Issue: Python not found**
+- Ensure Python is added to PATH during installation
+- Restart PowerShell after installing Python
+- Verify: `python --version`
+
+**Issue: Azure CLI line continuation**
+- Use backtick `` ` `` (not backslash `\`) for multi-line commands
+- Ensure no spaces after the backtick
+
+**Issue: curl alias conflicts**
+- PowerShell has a `curl` alias for `Invoke-WebRequest`
+- Use `curl.exe` explicitly for the real curl command
+- Or remove alias: `Remove-Item alias:curl`
+
+**Issue: Bash scripts on Windows**
+- Install Git Bash or WSL (Windows Subsystem for Linux)
+- Or convert shell scripts to PowerShell equivalents
 
 ## Cost Estimation
 
