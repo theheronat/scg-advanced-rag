@@ -675,7 +675,7 @@ For Excel/CSV, the response keeps the usual keys (`pdf_filename` is `null`; `loc
 **Self-check (offline, Azure calls mocked):**
 
 ```bash
-python selfcheck_tabular.py accounting_knowledge_rag_demo.xlsx
+python selfcheck_tabular.py raw/accounting_knowledge_rag_demo.xlsx
 ```
 
 ## API Endpoints
