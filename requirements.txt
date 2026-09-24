@@ -19,3 +19,4 @@ langchain
 beautifulsoup4
 markdown
 tqdm
+charset-normalizer

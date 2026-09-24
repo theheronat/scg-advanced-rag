@@ -5,6 +5,7 @@ A serverless Azure Functions application for processing and indexing documents u
 ## Features
 
 - **Document Processing**: Extract text and structure from various document formats (PDF, images, Office documents)
+- **Native Excel / CSV Ingestion**: Spreadsheets skip PDF/OCR; tables are converted to Markdown with merged headers preserved, chunked by row, and embedded images are OCR'd
 - **Intelligent Chunking**: Smart document chunking with configurable overlap for optimal retrieval
 - **Vector Embeddings**: Generate embeddings using Azure OpenAI for semantic search
 - **Azure AI Search Integration**: Automatically index processed documents with metadata
@@ -604,6 +605,78 @@ chmod +x docker-deploy.sh
 ### Multi-Tenant Deployment
 
 See [MULTI_TENANT_DEPLOYMENT.md](MULTI_TENANT_DEPLOYMENT.md) for deploying multiple isolated instances.
+
+## Excel & CSV Ingestion (native tabular path)
+
+`ingest` routes spreadsheets away from the LibreOffice → PDF → OCR flow. The PDF/OCR flow for
+`.pdf`, `.docx`, `.pptx`, and images is unchanged.
+
+| Extension | Reader | Notes |
+|---|---|---|
+| `.xlsx`, `.xlsm` | `openpyxl` (normal mode, `data_only=True`) | formulas → cached values; merged cells, fonts, and images are read |
+| `.xls` | `xlrd` (`formatting_info=True`) | merged cells + bold supported; embedded images are **not** extracted |
+| `.csv`, `.tsv` | stdlib `csv` | encoding + delimiter auto-detected; values stay strings |
+
+```
+Excel/CSV → read cells → detect layout → Markdown/HTML tables → row-aware chunks
+          → contextualize_batch → embed_batch → index_docs (batches of 100)
+Excel images → upload to blob → Form Recognizer OCR (prebuilt-layout) → image chunk
+```
+
+**Layout detection (Excel).** Real workbooks rarely have "row 1 = header", so each visible sheet is split into:
+- *bands*: a single merged or lone value outside a table. A band becomes the sheet title, a table title, or an image caption. Any other band goes into a per-sheet `notes` chunk, so no text is lost.
+- *tables*: contiguous non-band rows. Header rows are the leading all-bold rows (up to 3). If a sheet has no styling, the header is the first row, extended downward while a merged cell groups sub-columns below it (two-level headers become `Group / Sub`).
+- *key-value grids*: bold labels and plain values in alternating columns. These are rendered as a `Field | Value` table.
+- Hidden sheets, empty columns, and duplicate columns created by horizontal merges are dropped. Dates are written as `YYYY-MM-DD`, `1000.0` becomes `1000`, and empty cells become `""`.
+
+**Chunking.** Rows are never split. Every chunk starts with a context line
+(`# Sheet: {sheet} — {sheet title} — {table title} — Columns: …` or `# File: {csv} — Columns: …`),
+followed by the header row(s). `EXCEL_ROW_OVERLAP` rows carry over into the next chunk. A single row longer than
+`MAX_SECTION_LENGTH` becomes its own chunk.
+
+**Index mapping (no schema change).**
+
+| Field | Excel | CSV |
+|---|---|---|
+| `section` | `{sheet}#chunk_{i}`, `{sheet}#image_{n}`, `{sheet}#notes` | `{basename}#chunk_{i}` |
+| `page` | 1-based sheet position in the workbook | `1` |
+| `block_type` | `table` / `image` / `paragraph` (notes) | `table` |
+| `source_file` | original file name (e.g. `report.xlsx`, **not** `.pdf`) | original file name |
+| `id` | `sanitize_document_id("{base}-{sheet}-{i}")` | `sanitize_document_id("{base}-{i}")` |
+
+Names that contain non-ASCII characters (e.g. Thai sheet names) get a short SHA-1 suffix before sanitizing.
+`sanitize_document_id` replaces every Thai character with `_`, so without the suffix all Thai sheet names would produce the same ID.
+The image blob URL is stored inside `content` (`(image_url: …)`) because the index has no field for it.
+Use `delete_by_source` with the original `.xlsx`/`.csv` name.
+
+**Embedded images (Excel).** Images come from `ws._images`. If openpyxl exposes no images for a sheet (e.g. EMF/WMF), they are read from the
+xlsx zip (`xl/media` via drawing rels) instead. Images smaller than `EXCEL_IMAGE_MIN_PX` or 1 KB are skipped, and GIFs and other formats are converted to PNG.
+Each image is uploaded to `processed/images/{base}/{sheet}/{n}.{ext}` and OCR'd with the same Form Recognizer client as
+`ocr_pdf`. Identical images are OCR'd once. If OCR fails for one image, it is logged and the image is indexed with its URL only.
+Charts are counted and logged but not rasterized.
+
+**CSV encoding / delimiter.** The encoder first tries `utf-8-sig`/`utf-8`, validated over the whole file. It then tries `cp874` when the decoded text is
+mostly Thai characters, then `charset-normalizer`'s guess, then `tis-620`, and finally `latin-1`. Delimiter detection uses `csv.Sniffer` over `, ; \t |`
+(`.tsv` always uses tab; the fallback is comma). Ragged rows are padded, and extra columns are kept as `Column N`.
+
+**Environment flags**
+
+| Variable | Default | Values |
+|---|---|---|
+| `EXCEL_TABLE_FORMAT` | `markdown` | `markdown` \| `html` (same `<table>` shape as OCR output) |
+| `EXCEL_SAVE_PROCESSED_FORMAT` | `md` | `md` \| `html` \| `none`: readable copy saved to local `processed/` + blob `processed` (Excel and CSV) |
+| `EXCEL_IMAGE_MODE` | `ocr_ref` | `ocr_ref` (upload + OCR + reference) \| `ref_only` (upload + reference) \| `none` |
+| `EXCEL_IMAGE_MIN_PX` | `40` | minimum image width/height sent to OCR |
+| `EXCEL_ROW_OVERLAP` | `1` | data rows repeated at the start of the next chunk |
+
+For Excel/CSV, the response keeps the usual keys (`pdf_filename` is `null`; `local_path`/`blob_url` point to the processed `.md`/`.html`) and adds
+`processed_filename`, `file_type`, and `block_types`.
+
+**Self-check (offline, Azure calls mocked):**
+
+```bash
+python selfcheck_tabular.py accounting_knowledge_rag_demo.xlsx
+```
 
 ## API Endpoints
 
