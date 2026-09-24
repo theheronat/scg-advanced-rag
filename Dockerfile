@@ -1,6 +1,7 @@
 # Azure Functions Python with LibreOffice
-# Use AMD64 platform for Azure deployment (even on Apple Silicon)
-FROM --platform=linux/amd64 mcr.microsoft.com/azure-functions/python:4-python3.11
+# Build for AMD64 (Azure) by passing --platform linux/amd64 to docker build / az acr build.
+# Not set on FROM: ACR Tasks' dependency scanner cannot parse "FROM --platform=...".
+FROM mcr.microsoft.com/azure-functions/python:4-python3.11
 
 # Install system dependencies including LibreOffice
 RUN apt-get update && apt-get install -y \
