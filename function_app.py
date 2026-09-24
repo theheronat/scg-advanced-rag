@@ -152,8 +152,48 @@ def convert_to_pdf(input_file, output_file):
         return False
     
 
+def _normalize_ooxml_package(path):
+    """
+    Rewrite namespace-prefixed OPC package parts ([Content_Types].xml, *.rels) to the
+    default namespace, in place. Tools that re-serialize these parts with ElementTree
+    produce '<ns0:Types xmlns:ns0=...>': valid XML that Office opens but LibreOffice
+    rejects, making the PDF conversion fail. Unaffected files are left untouched.
+    """
+    import re
+    try:
+        with zipfile.ZipFile(path) as zin:
+            parts = {n: zin.read(n) for n in zin.namelist()}
+            infos = {i.filename: i for i in zin.infolist()}
+    except zipfile.BadZipFile:
+        return False
+
+    fixed = []
+    for name, data in parts.items():
+        if name != "[Content_Types].xml" and not name.endswith(".rels"):
+            continue
+        m = re.search(rb'<([A-Za-z_][\w.-]*):(?:Types|Relationships)\b[^>]*\bxmlns:\1="', data[:1024])
+        if not m:
+            continue
+        p = m.group(1)
+        parts[name] = (data.replace(b"<" + p + b":", b"<")
+                           .replace(b"</" + p + b":", b"</")
+                           .replace(b"xmlns:" + p + b"=", b"xmlns="))
+        fixed.append(name)
+
+    if not fixed:
+        return False
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as zout:
+        for name, data in parts.items():
+            zout.writestr(infos[name], data)
+    logging.info(f"🩹 Normalized namespace-prefixed package parts: {', '.join(fixed)}")
+    return True
+
+
 def _convert_office_to_pdf(input_file, output_file):
     try:
+        _normalize_ooxml_package(input_file)
+
+
         env = os.environ.copy()
         temp_profile = tempfile.mkdtemp(prefix="libreoffice_")
         env["HOME"] = temp_profile
@@ -421,6 +461,7 @@ def split_text(page_map):
     SENTENCE_ENDINGS = [".", "!", "?"]
     WORDS_BREAKS = [",", ";", ":", " ", "(", ")", "[", "]", "{", "}", "\t", "\n"]
 
+    end = 0
     while start + SECTION_OVERLAP < length:
         last_word = -1
         end = start + MAX_SECTION_LENGTH
@@ -453,7 +494,11 @@ def split_text(page_map):
         else:
             start = end - SECTION_OVERLAP
 
-    if start + SECTION_OVERLAP < end:
+    if end == 0:
+        # Text shorter than SECTION_OVERLAP (e.g. a short OCR'd image): the loop never ran
+        if all_text.strip():
+            yield (all_text, 0)
+    elif start + SECTION_OVERLAP < end:
         yield (all_text[start:end], find_page(start))
 
 
