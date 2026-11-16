@@ -15,15 +15,28 @@ A serverless Azure Functions application for processing and indexing documents u
 
 ## Architecture
 
+`POST /api/ingest` downloads one blob, routes it by file extension, and indexes the result in Azure AI Search.
+
 ```
-Document Upload → Azure Storage → Azure Functions → Document Intelligence
-                                         ↓
-                                   Text Chunking
-                                         ↓
-                                  Azure OpenAI (Embeddings)
-                                         ↓
-                                  Azure AI Search (Indexing)
+Blob (raw) → ingest → route by extension
+  ├─ .pdf .docx .pptx .jpg .jpeg .jpe .png → LibreOffice/Pillow → PDF → Document Intelligence OCR → split_text
+  ├─ .xlsx .xlsm .xls                      → native Excel reader (merged headers, layout, embedded images)
+  └─ .csv .tsv                             → native CSV reader (encoding + delimiter detection)
+                      ↓
+        contextualize (Azure OpenAI) → embed (Azure OpenAI) → Azure AI Search
+        processed copy (.pdf / .md / .html) → local processed/ + blob processed
 ```
+
+![Function App internals](Function%20App%20Internals-selection.png)
+
+| File type | Path | `source_file` in the index |
+|---|---|---|
+| `.pdf` | OCR | original name |
+| `.docx`, `.pptx`, `.jpg`, `.jpeg`, `.jpe`, `.png` | converted to PDF, then OCR | converted `.pdf` name |
+| `.xlsx`, `.xlsm`, `.xls` | native Excel | original name |
+| `.csv`, `.tsv` | native CSV | original name |
+
+All 12 extensions were tested end to end against the deployed Function App (15 files, 15 succeeded).
 
 ## Prerequisites
 
@@ -594,13 +607,26 @@ Expected response:
 
 ### Docker Deployment
 
-See [DOCKER_DEPLOYMENT.md](DOCKER_DEPLOYMENT.md) for containerized deployment.
+The Function App `azfn-scg-dataprep` runs in container mode (`bmgcontainer.azurecr.io/azfn-scg-dataprep:latest`) because the document path needs LibreOffice and Ghostscript. See [DOCKER_DEPLOYMENT.md](DOCKER_DEPLOYMENT.md) for details.
+
+With local Docker:
 
 ```bash
-# Build and deploy with Docker
 chmod +x docker-deploy.sh
 ./docker-deploy.sh
 ```
+
+Without local Docker, build in the cloud with ACR Tasks (native amd64, no Docker Desktop needed). Keep a backup tag of the current image first so you can roll back:
+
+```bash
+az acr import -n bmgcontainer --source bmgcontainer.azurecr.io/azfn-scg-dataprep:latest --image azfn-scg-dataprep:backup-$(date +%Y%m%d)
+az acr build -r bmgcontainer --platform linux/amd64 -t azfn-scg-dataprep:latest -t azfn-scg-dataprep:$(git rev-parse --short HEAD) .
+az functionapp restart -n azfn-scg-dataprep -g BMG-OpenAI
+```
+
+To roll back, re-tag the backup as `latest` (`az acr import ... --force`) and restart the app. The `Dockerfile` does not set `--platform` on `FROM` because the ACR Tasks dependency scanner cannot parse it; pass the platform on the command line instead.
+
+The first request after a restart can take longer than usual. If a client times out on it, retry once.
 
 ### Multi-Tenant Deployment
 
@@ -680,85 +706,58 @@ python selfcheck_tabular.py raw/accounting_knowledge_rag_demo.xlsx
 
 ## API Endpoints
 
-Once deployed, the following endpoints are available:
+All routes accept a JSON body over HTTP POST and use anonymous auth.
 
-### Document Processing
+| Route | Body | Purpose |
+|---|---|---|
+| `/api/ingest` | `{"blob_url": "...", "category": "general"}` | Process one blob and index its chunks. `category` is optional (default `general`). |
+| `/api/delete_by_id` | `{"doc_id": "..."}` | Delete one indexed chunk. |
+| `/api/delete_by_source` | `{"source_file": "..."}` | Delete all chunks of one file. Use the `source_file` value shown in the table above. |
+| `/api/delete_all` | `{"confirm": true}` | Delete every document in the index. |
 
-- `POST /api/upload` - Upload a document for processing
-- `POST /api/process/{filename}` - Process a specific document
-- `GET /api/status/{document_id}` - Check processing status
-- `DELETE /api/documents/{document_id}` - Delete a document and its chunks
-
-### Health & Management
-
-- `GET /api/health` - Health check endpoint
-- `GET /api/documents` - List all processed documents
-- `GET /api/search?query={text}` - Search indexed documents
-
-For detailed API documentation, see [API_USAGE.md](API_USAGE.md).
+The target index is the `AZURE_SEARCH_INDEX` app setting (currently `advance-rag` on `azfn-scg-dataprep`). For more detail, see [API_USAGE.md](API_USAGE.md).
 
 ## Example Usage
 
-### Upload and Process a Document
+### Ingest a file
+
+Upload the file to the `raw` container first, then call `ingest` with its blob URL (URL-encode spaces and Thai characters).
 
 **Linux/Mac:**
 ```bash
-# Upload a document
-curl -X POST \
-  -F "file=@document.pdf" \
-  https://azfn-scg-dataprep.azurewebsites.net/api/upload
+curl -X POST https://azfn-scg-dataprep.azurewebsites.net/api/ingest \
+  -H "Content-Type: application/json" \
+  -d '{"blob_url": "https://scgaidata.blob.core.windows.net/raw/report.xlsx", "category": "accounting"}'
+```
 
-# Response
+**Windows (PowerShell):**
+```powershell
+$body = @{ blob_url = "https://scgaidata.blob.core.windows.net/raw/report.xlsx"; category = "accounting" } | ConvertTo-Json
+Invoke-RestMethod -Uri "https://azfn-scg-dataprep.azurewebsites.net/api/ingest" -Method Post -ContentType "application/json" -Body $body
+```
+
+Response for an Excel file (PDF-path files return the same keys, with `pdf_filename` set):
+
+```json
 {
-  "message": "File uploaded successfully",
-  "filename": "document.pdf",
-  "document_id": "doc_12345"
+  "status": "success",
+  "chunks": 13,
+  "filename": "report.xlsx",
+  "pdf_filename": null,
+  "local_path": "/home/site/wwwroot/processed/2026-09-24/report.md",
+  "blob_url": "https://scgaidata.blob.core.windows.net/processed/report.md",
+  "processed_filename": "report.md",
+  "file_type": "excel",
+  "block_types": {"paragraph": 5, "table": 7, "image": 1}
 }
-
-# Process the document
-curl -X POST \
-  https://azfn-scg-dataprep.azurewebsites.net/api/process/document.pdf
-
-# Check status
-curl https://azfn-scg-dataprep.azurewebsites.net/api/status/doc_12345
 ```
 
-**Windows (PowerShell):**
-```powershell
-# Upload a document
-curl.exe -X POST `
-  -F "file=@document.pdf" `
-  https://azfn-scg-dataprep.azurewebsites.net/api/upload
+### Delete a file's chunks
 
-# Or using PowerShell native commands
-$headers = @{
-    "Content-Type" = "multipart/form-data"
-}
-$filePath = "C:\path\to\document.pdf"
-$uri = "https://azfn-scg-dataprep.azurewebsites.net/api/upload"
-Invoke-RestMethod -Uri $uri -Method Post -InFile $filePath -Headers $headers
-
-# Process the document
-curl.exe -X POST https://azfn-scg-dataprep.azurewebsites.net/api/process/document.pdf
-
-# Check status
-curl.exe https://azfn-scg-dataprep.azurewebsites.net/api/status/doc_12345
-```
-
-### Search Documents
-
-**Linux/Mac:**
 ```bash
-curl "https://azfn-scg-dataprep.azurewebsites.net/api/search?query=azure+functions"
-```
-
-**Windows (PowerShell):**
-```powershell
-# Using curl
-curl.exe "https://azfn-scg-dataprep.azurewebsites.net/api/search?query=azure+functions"
-
-# Or using PowerShell native command
-Invoke-RestMethod -Uri "https://azfn-scg-dataprep.azurewebsites.net/api/search?query=azure+functions"
+curl -X POST https://azfn-scg-dataprep.azurewebsites.net/api/delete_by_source \
+  -H "Content-Type: application/json" \
+  -d '{"source_file": "report.xlsx"}'
 ```
 
 ## Configuration Options
@@ -777,8 +776,11 @@ Invoke-RestMethod -Uri "https://azfn-scg-dataprep.azurewebsites.net/api/search?q
 | `AZURE_SEARCH_KEY` | Search admin key | Yes |
 | `AZURE_OPENAI_URL` | Azure OpenAI endpoint | Yes |
 | `AZURE_OPENAI_API_KEY` | Azure OpenAI API key | Yes |
+| `AZURE_OPENAI_API_VERSION` | Azure OpenAI API version | Yes |
 | `AZURE_OPENAI_EMBEDDING_MODEL` | Embedding model deployment name | Yes |
-| `AZURE_OPENAI_MODEL` | Chat model deployment name | No |
+| `AZURE_OPENAI_MODEL` | Chat model deployment name, used to contextualize chunks | Yes |
+
+Excel/CSV flags (`EXCEL_TABLE_FORMAT`, `EXCEL_SAVE_PROCESSED_FORMAT`, `EXCEL_IMAGE_MODE`, `EXCEL_IMAGE_MIN_PX`, `EXCEL_ROW_OVERLAP`) are described in [Excel & CSV Ingestion](#excel--csv-ingestion-native-tabular-path).
 
 ## Monitoring and Troubleshooting
 
@@ -816,6 +818,21 @@ az webapp log tail `
 
 **Issue: OpenAI rate limits**
 - Solution: Implement retry logic or increase quota
+
+**Issue: `File conversion to PDF failed` for a `.docx` or `.pptx`**
+- Check that LibreOffice is installed (`soffice --version`). Locally, the Homebrew wrapper can remain after `/Applications/LibreOffice.app` is removed; reinstall with `brew reinstall --cask libreoffice`.
+- Files whose `[Content_Types].xml` or `.rels` parts were re-serialized with a namespace prefix (`<ns0:Types>`) are normalized automatically before conversion.
+
+**Issue: Short OCR text (e.g. a receipt image) used to fail**
+- Fixed: text shorter than `SECTION_OVERLAP` is now kept as one section.
+
+**Issue: Large chunks for wide Excel tables**
+- A single row longer than `MAX_SECTION_LENGTH` becomes its own chunk, so very wide tables with long text cells produce chunks above 2,000 characters. No data is lost.
+
+**Self-check (offline, Azure calls mocked)**
+```bash
+python selfcheck_tabular.py raw/accounting_knowledge_rag_demo.xlsx
+```
 
 ### Windows-Specific Troubleshooting
 
