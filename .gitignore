@@ -50,3 +50,6 @@ tmp/
 
 # Docker
 .dockerignore
+
+# Local processed output (save_to_local_processed)
+processed/

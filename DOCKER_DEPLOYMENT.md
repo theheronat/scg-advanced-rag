@@ -14,18 +14,38 @@ Azure Function แบบปกติ (Zip deployment) **ไม่มี LibreOff
 ## 📋 สิ่งที่ต้องมี
 
 1. **Docker Desktop** ติดตั้งและรันอยู่
+
+   **Linux/Mac:**
    ```bash
    docker --version
    ```
 
+   **Windows (PowerShell):**
+   ```powershell
+   docker --version
+   ```
+
 2. **Azure CLI** login แล้ว
+
+   **Linux/Mac:**
    ```bash
+   az account show
+   ```
+
+   **Windows (PowerShell):**
+   ```powershell
    az account show
    ```
 
 3. **Azure Container Registry**: `bmgcontainer` (มีอยู่แล้ว)
 
 4. **Function App**: `azfn-scg-dataprep` ต้องตั้งค่าเป็น **Container mode**
+
+> **หมายเหตุสำหรับผู้ใช้ Windows:**
+> - ใช้ PowerShell 7+ (แนะนำ) หรือ Command Prompt
+> - ติดตั้ง Docker Desktop for Windows จาก [https://www.docker.com/products/docker-desktop/](https://www.docker.com/products/docker-desktop/)
+> - ควรเปิดใช้งาน WSL 2 backend สำหรับ Docker
+> - ใช้ backtick `` ` `` สำหรับ line continuation ใน PowerShell
 
 ---
 

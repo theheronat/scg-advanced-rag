@@ -5,6 +5,7 @@ A serverless Azure Functions application for processing and indexing documents u
 ## Features
 
 - **Document Processing**: Extract text and structure from various document formats (PDF, images, Office documents)
+- **Native Excel / CSV Ingestion**: Spreadsheets skip PDF/OCR; tables are converted to Markdown with merged headers preserved, chunked by row, and embedded images are OCR'd
 - **Intelligent Chunking**: Smart document chunking with configurable overlap for optimal retrieval
 - **Vector Embeddings**: Generate embeddings using Azure OpenAI for semantic search
 - **Azure AI Search Integration**: Automatically index processed documents with metadata
@@ -14,15 +15,28 @@ A serverless Azure Functions application for processing and indexing documents u
 
 ## Architecture
 
+`POST /api/ingest` downloads one blob, routes it by file extension, and indexes the result in Azure AI Search.
+
 ```
-Document Upload → Azure Storage → Azure Functions → Document Intelligence
-                                         ↓
-                                   Text Chunking
-                                         ↓
-                                  Azure OpenAI (Embeddings)
-                                         ↓
-                                  Azure AI Search (Indexing)
+Blob (raw) → ingest → route by extension
+  ├─ .pdf .docx .pptx .jpg .jpeg .jpe .png → LibreOffice/Pillow → PDF → Document Intelligence OCR → split_text
+  ├─ .xlsx .xlsm .xls                      → native Excel reader (merged headers, layout, embedded images)
+  └─ .csv .tsv                             → native CSV reader (encoding + delimiter detection)
+                      ↓
+        contextualize (Azure OpenAI) → embed (Azure OpenAI) → Azure AI Search
+        processed copy (.pdf / .md / .html) → local processed/ + blob processed
 ```
+
+![Function App internals](Function%20App%20Internals-selection.png)
+
+| File type | Path | `source_file` in the index |
+|---|---|---|
+| `.pdf` | OCR | original name |
+| `.docx`, `.pptx`, `.jpg`, `.jpeg`, `.jpe`, `.png` | converted to PDF, then OCR | converted `.pdf` name |
+| `.xlsx`, `.xlsm`, `.xls` | native Excel | original name |
+| `.csv`, `.tsv` | native CSV | original name |
+
+All 12 extensions were tested end to end against the deployed Function App (15 files, 15 succeeded).
 
 ## Prerequisites
 
@@ -593,99 +607,157 @@ Expected response:
 
 ### Docker Deployment
 
-See [DOCKER_DEPLOYMENT.md](DOCKER_DEPLOYMENT.md) for containerized deployment.
+The Function App `azfn-scg-dataprep` runs in container mode (`bmgcontainer.azurecr.io/azfn-scg-dataprep:latest`) because the document path needs LibreOffice and Ghostscript. See [DOCKER_DEPLOYMENT.md](DOCKER_DEPLOYMENT.md) for details.
+
+With local Docker:
 
 ```bash
-# Build and deploy with Docker
 chmod +x docker-deploy.sh
 ./docker-deploy.sh
 ```
+
+Without local Docker, build in the cloud with ACR Tasks (native amd64, no Docker Desktop needed). Keep a backup tag of the current image first so you can roll back:
+
+```bash
+az acr import -n bmgcontainer --source bmgcontainer.azurecr.io/azfn-scg-dataprep:latest --image azfn-scg-dataprep:backup-$(date +%Y%m%d)
+az acr build -r bmgcontainer --platform linux/amd64 -t azfn-scg-dataprep:latest -t azfn-scg-dataprep:$(git rev-parse --short HEAD) .
+az functionapp restart -n azfn-scg-dataprep -g BMG-OpenAI
+```
+
+To roll back, re-tag the backup as `latest` (`az acr import ... --force`) and restart the app. The `Dockerfile` does not set `--platform` on `FROM` because the ACR Tasks dependency scanner cannot parse it; pass the platform on the command line instead.
+
+The first request after a restart can take longer than usual. If a client times out on it, retry once.
 
 ### Multi-Tenant Deployment
 
 See [MULTI_TENANT_DEPLOYMENT.md](MULTI_TENANT_DEPLOYMENT.md) for deploying multiple isolated instances.
 
+## Excel & CSV Ingestion (native tabular path)
+
+`ingest` routes spreadsheets away from the LibreOffice → PDF → OCR flow. The PDF/OCR flow for
+`.pdf`, `.docx`, `.pptx`, and images is unchanged.
+
+| Extension | Reader | Notes |
+|---|---|---|
+| `.xlsx`, `.xlsm` | `openpyxl` (normal mode, `data_only=True`) | formulas → cached values; merged cells, fonts, and images are read |
+| `.xls` | `xlrd` (`formatting_info=True`) | merged cells + bold supported; embedded images are **not** extracted |
+| `.csv`, `.tsv` | stdlib `csv` | encoding + delimiter auto-detected; values stay strings |
+
+```
+Excel/CSV → read cells → detect layout → Markdown/HTML tables → row-aware chunks
+          → contextualize_batch → embed_batch → index_docs (batches of 100)
+Excel images → upload to blob → Form Recognizer OCR (prebuilt-layout) → image chunk
+```
+
+**Layout detection (Excel).** Real workbooks rarely have "row 1 = header", so each visible sheet is split into:
+- *bands*: a single merged or lone value outside a table. A band becomes the sheet title, a table title, or an image caption. Any other band goes into a per-sheet `notes` chunk, so no text is lost.
+- *tables*: contiguous non-band rows. Header rows are the leading all-bold rows (up to 3). If a sheet has no styling, the header is the first row, extended downward while a merged cell groups sub-columns below it (two-level headers become `Group / Sub`).
+- *key-value grids*: bold labels and plain values in alternating columns. These are rendered as a `Field | Value` table.
+- Hidden sheets, empty columns, and duplicate columns created by horizontal merges are dropped. Dates are written as `YYYY-MM-DD`, `1000.0` becomes `1000`, and empty cells become `""`.
+
+**Chunking.** Rows are never split. Every chunk starts with a context line
+(`# Sheet: {sheet} — {sheet title} — {table title} — Columns: …` or `# File: {csv} — Columns: …`),
+followed by the header row(s). `EXCEL_ROW_OVERLAP` rows carry over into the next chunk. A single row longer than
+`MAX_SECTION_LENGTH` becomes its own chunk.
+
+**Index mapping (no schema change).**
+
+| Field | Excel | CSV |
+|---|---|---|
+| `section` | `{sheet}#chunk_{i}`, `{sheet}#image_{n}`, `{sheet}#notes` | `{basename}#chunk_{i}` |
+| `page` | 1-based sheet position in the workbook | `1` |
+| `block_type` | `table` / `image` / `paragraph` (notes) | `table` |
+| `source_file` | original file name (e.g. `report.xlsx`, **not** `.pdf`) | original file name |
+| `id` | `sanitize_document_id("{base}-{sheet}-{i}")` | `sanitize_document_id("{base}-{i}")` |
+
+Names that contain non-ASCII characters (e.g. Thai sheet names) get a short SHA-1 suffix before sanitizing.
+`sanitize_document_id` replaces every Thai character with `_`, so without the suffix all Thai sheet names would produce the same ID.
+The image blob URL is stored inside `content` (`(image_url: …)`) because the index has no field for it.
+Use `delete_by_source` with the original `.xlsx`/`.csv` name.
+
+**Embedded images (Excel).** Images come from `ws._images`. If openpyxl exposes no images for a sheet (e.g. EMF/WMF), they are read from the
+xlsx zip (`xl/media` via drawing rels) instead. Images smaller than `EXCEL_IMAGE_MIN_PX` or 1 KB are skipped, and GIFs and other formats are converted to PNG.
+Each image is uploaded to `processed/images/{base}/{sheet}/{n}.{ext}` and OCR'd with the same Form Recognizer client as
+`ocr_pdf`. Identical images are OCR'd once. If OCR fails for one image, it is logged and the image is indexed with its URL only.
+Charts are counted and logged but not rasterized.
+
+**CSV encoding / delimiter.** The encoder first tries `utf-8-sig`/`utf-8`, validated over the whole file. It then tries `cp874` when the decoded text is
+mostly Thai characters, then `charset-normalizer`'s guess, then `tis-620`, and finally `latin-1`. Delimiter detection uses `csv.Sniffer` over `, ; \t |`
+(`.tsv` always uses tab; the fallback is comma). Ragged rows are padded, and extra columns are kept as `Column N`.
+
+**Environment flags**
+
+| Variable | Default | Values |
+|---|---|---|
+| `EXCEL_TABLE_FORMAT` | `markdown` | `markdown` \| `html` (same `<table>` shape as OCR output) |
+| `EXCEL_SAVE_PROCESSED_FORMAT` | `md` | `md` \| `html` \| `none`: readable copy saved to local `processed/` + blob `processed` (Excel and CSV) |
+| `EXCEL_IMAGE_MODE` | `ocr_ref` | `ocr_ref` (upload + OCR + reference) \| `ref_only` (upload + reference) \| `none` |
+| `EXCEL_IMAGE_MIN_PX` | `40` | minimum image width/height sent to OCR |
+| `EXCEL_ROW_OVERLAP` | `1` | data rows repeated at the start of the next chunk |
+
+For Excel/CSV, the response keeps the usual keys (`pdf_filename` is `null`; `local_path`/`blob_url` point to the processed `.md`/`.html`) and adds
+`processed_filename`, `file_type`, and `block_types`.
+
+**Self-check (offline, Azure calls mocked):**
+
+```bash
+python selfcheck_tabular.py raw/accounting_knowledge_rag_demo.xlsx
+```
+
 ## API Endpoints
 
-Once deployed, the following endpoints are available:
+All routes accept a JSON body over HTTP POST and use anonymous auth.
 
-### Document Processing
+| Route | Body | Purpose |
+|---|---|---|
+| `/api/ingest` | `{"blob_url": "...", "category": "general"}` | Process one blob and index its chunks. `category` is optional (default `general`). |
+| `/api/delete_by_id` | `{"doc_id": "..."}` | Delete one indexed chunk. |
+| `/api/delete_by_source` | `{"source_file": "..."}` | Delete all chunks of one file. Use the `source_file` value shown in the table above. |
+| `/api/delete_all` | `{"confirm": true}` | Delete every document in the index. |
 
-- `POST /api/upload` - Upload a document for processing
-- `POST /api/process/{filename}` - Process a specific document
-- `GET /api/status/{document_id}` - Check processing status
-- `DELETE /api/documents/{document_id}` - Delete a document and its chunks
-
-### Health & Management
-
-- `GET /api/health` - Health check endpoint
-- `GET /api/documents` - List all processed documents
-- `GET /api/search?query={text}` - Search indexed documents
-
-For detailed API documentation, see [API_USAGE.md](API_USAGE.md).
+The target index is the `AZURE_SEARCH_INDEX` app setting (currently `advance-rag` on `azfn-scg-dataprep`). For more detail, see [API_USAGE.md](API_USAGE.md).
 
 ## Example Usage
 
-### Upload and Process a Document
+### Ingest a file
+
+Upload the file to the `raw` container first, then call `ingest` with its blob URL (URL-encode spaces and Thai characters).
 
 **Linux/Mac:**
 ```bash
-# Upload a document
-curl -X POST \
-  -F "file=@document.pdf" \
-  https://azfn-scg-dataprep.azurewebsites.net/api/upload
+curl -X POST https://azfn-scg-dataprep.azurewebsites.net/api/ingest \
+  -H "Content-Type: application/json" \
+  -d '{"blob_url": "https://scgaidata.blob.core.windows.net/raw/report.xlsx", "category": "accounting"}'
+```
 
-# Response
+**Windows (PowerShell):**
+```powershell
+$body = @{ blob_url = "https://scgaidata.blob.core.windows.net/raw/report.xlsx"; category = "accounting" } | ConvertTo-Json
+Invoke-RestMethod -Uri "https://azfn-scg-dataprep.azurewebsites.net/api/ingest" -Method Post -ContentType "application/json" -Body $body
+```
+
+Response for an Excel file (PDF-path files return the same keys, with `pdf_filename` set):
+
+```json
 {
-  "message": "File uploaded successfully",
-  "filename": "document.pdf",
-  "document_id": "doc_12345"
+  "status": "success",
+  "chunks": 13,
+  "filename": "report.xlsx",
+  "pdf_filename": null,
+  "local_path": "/home/site/wwwroot/processed/2026-09-24/report.md",
+  "blob_url": "https://scgaidata.blob.core.windows.net/processed/report.md",
+  "processed_filename": "report.md",
+  "file_type": "excel",
+  "block_types": {"paragraph": 5, "table": 7, "image": 1}
 }
-
-# Process the document
-curl -X POST \
-  https://azfn-scg-dataprep.azurewebsites.net/api/process/document.pdf
-
-# Check status
-curl https://azfn-scg-dataprep.azurewebsites.net/api/status/doc_12345
 ```
 
-**Windows (PowerShell):**
-```powershell
-# Upload a document
-curl.exe -X POST `
-  -F "file=@document.pdf" `
-  https://azfn-scg-dataprep.azurewebsites.net/api/upload
+### Delete a file's chunks
 
-# Or using PowerShell native commands
-$headers = @{
-    "Content-Type" = "multipart/form-data"
-}
-$filePath = "C:\path\to\document.pdf"
-$uri = "https://azfn-scg-dataprep.azurewebsites.net/api/upload"
-Invoke-RestMethod -Uri $uri -Method Post -InFile $filePath -Headers $headers
-
-# Process the document
-curl.exe -X POST https://azfn-scg-dataprep.azurewebsites.net/api/process/document.pdf
-
-# Check status
-curl.exe https://azfn-scg-dataprep.azurewebsites.net/api/status/doc_12345
-```
-
-### Search Documents
-
-**Linux/Mac:**
 ```bash
-curl "https://azfn-scg-dataprep.azurewebsites.net/api/search?query=azure+functions"
-```
-
-**Windows (PowerShell):**
-```powershell
-# Using curl
-curl.exe "https://azfn-scg-dataprep.azurewebsites.net/api/search?query=azure+functions"
-
-# Or using PowerShell native command
-Invoke-RestMethod -Uri "https://azfn-scg-dataprep.azurewebsites.net/api/search?query=azure+functions"
+curl -X POST https://azfn-scg-dataprep.azurewebsites.net/api/delete_by_source \
+  -H "Content-Type: application/json" \
+  -d '{"source_file": "report.xlsx"}'
 ```
 
 ## Configuration Options
@@ -704,8 +776,11 @@ Invoke-RestMethod -Uri "https://azfn-scg-dataprep.azurewebsites.net/api/search?q
 | `AZURE_SEARCH_KEY` | Search admin key | Yes |
 | `AZURE_OPENAI_URL` | Azure OpenAI endpoint | Yes |
 | `AZURE_OPENAI_API_KEY` | Azure OpenAI API key | Yes |
+| `AZURE_OPENAI_API_VERSION` | Azure OpenAI API version | Yes |
 | `AZURE_OPENAI_EMBEDDING_MODEL` | Embedding model deployment name | Yes |
-| `AZURE_OPENAI_MODEL` | Chat model deployment name | No |
+| `AZURE_OPENAI_MODEL` | Chat model deployment name, used to contextualize chunks | Yes |
+
+Excel/CSV flags (`EXCEL_TABLE_FORMAT`, `EXCEL_SAVE_PROCESSED_FORMAT`, `EXCEL_IMAGE_MODE`, `EXCEL_IMAGE_MIN_PX`, `EXCEL_ROW_OVERLAP`) are described in [Excel & CSV Ingestion](#excel--csv-ingestion-native-tabular-path).
 
 ## Monitoring and Troubleshooting
 
@@ -743,6 +818,21 @@ az webapp log tail `
 
 **Issue: OpenAI rate limits**
 - Solution: Implement retry logic or increase quota
+
+**Issue: `File conversion to PDF failed` for a `.docx` or `.pptx`**
+- Check that LibreOffice is installed (`soffice --version`). Locally, the Homebrew wrapper can remain after `/Applications/LibreOffice.app` is removed; reinstall with `brew reinstall --cask libreoffice`.
+- Files whose `[Content_Types].xml` or `.rels` parts were re-serialized with a namespace prefix (`<ns0:Types>`) are normalized automatically before conversion.
+
+**Issue: Short OCR text (e.g. a receipt image) used to fail**
+- Fixed: text shorter than `SECTION_OVERLAP` is now kept as one section.
+
+**Issue: Large chunks for wide Excel tables**
+- A single row longer than `MAX_SECTION_LENGTH` becomes its own chunk, so very wide tables with long text cells produce chunks above 2,000 characters. No data is lost.
+
+**Self-check (offline, Azure calls mocked)**
+```bash
+python selfcheck_tabular.py raw/accounting_knowledge_rag_demo.xlsx
+```
 
 ### Windows-Specific Troubleshooting
 
